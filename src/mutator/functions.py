@@ -175,6 +175,7 @@ def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Si
                     file_key, owner.namespace, form, raw.start, raw.end, raw.original, raw.mutant
                 ),
                 anchor_line=raw.anchor_line,
+                within=raw.within,
             )
         )
     return found

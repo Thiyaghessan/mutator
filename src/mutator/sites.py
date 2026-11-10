@@ -98,7 +98,15 @@ _CLOJURE_HEAD = {
 
 class RawSite:
     def __init__(
-        self, line: int, start: int, end: int, original: str, mutant: str, category: str, anchor_line: int = 0
+        self,
+        line: int,
+        start: int,
+        end: int,
+        original: str,
+        mutant: str,
+        category: str,
+        anchor_line: int = 0,
+        within: tuple[int, int] | None = None,
     ):
         self.line = line
         # The line its statement starts on. LCOV marks only that line of a multi-line statement.
@@ -108,6 +116,8 @@ class RawSite:
         self.original = original
         self.mutant = mutant
         self.category = category
+        # See Site.within.
+        self.within = within
 
 
 def _grammar(language: str, path: str) -> str:
@@ -368,7 +378,8 @@ def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
 # - a statement inside braces is deleted, unless it is a return
 #
 # A return is one of two things. It is a call to `return(...)`, also when
-# written `` `return`(...) `` or wrapped as in `invisible(return(x))`. Or it
+# written `` `return`(...) `` or `"return"(...)`, put in parentheses, or
+# wrapped as in `invisible(return(x))`. Or it
 # is an expression whose value the function gives back: the last expression
 # of the function body, and, when that is an `if` or a `switch`, the last
 # expression of each of its branches. Arithmetic operators are left alone.
@@ -390,6 +401,36 @@ def _r_field_of(node) -> str:
     return ""
 
 
+# covr counts a statement inside braces by itself. A body written without
+# braces after `while`, `repeat`, or `function` is counted only as part of the
+# statement that holds it, so that statement having run does not show the
+# body ran. `for` is listed for the same reason, though covr does count its
+# body.
+#
+# A function is the one case with a count of its own: for a function assigned
+# at the top of a file, covr counts the body under the whole `function(...)`
+# expression. So for a function the bytes that must hold a count are those of
+# the `function(...)` expression, and for a loop they are those of the body.
+_R_BODY_OWNERS = {"while_statement", "repeat_statement", "for_statement", "function_definition"}
+
+
+def _r_body_without_braces(node) -> tuple[int, int] | None:
+    """Bytes that must hold a count for `node`, when its nearest body has no braces."""
+
+    current = node
+    while current.parent is not None:
+        parent = current.parent
+        if (
+            parent.type in _R_BODY_OWNERS
+            and current.type != "braced_expression"
+            and _r_field_of(current) == "body"
+        ):
+            measured = parent if parent.type == "function_definition" else current
+            return measured.start_byte, measured.end_byte
+        current = parent
+    return None
+
+
 def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str) -> None:
     found.append(
         RawSite(
@@ -399,6 +440,7 @@ def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str
             original=original,
             mutant=mutant,
             category=category,
+            within=_r_body_without_braces(node),
         )
     )
 
@@ -417,12 +459,10 @@ def _r_is_operator(node) -> bool:
 
 
 def _r_called_name(node, data: bytes) -> str:
-    """The plain name a call names, without backticks, or "" when it is not a plain name."""
+    """The name a call names, read the way crapper reads R names, or "" when it has none."""
 
-    function = node.child_by_field_name("function")
-    if function is None or function.type != "identifier":
-        return ""
-    return _text(data, function).strip("`")
+    crapper = ensure_crapper()
+    return crapper.languages.r.plain_name(data, node.child_by_field_name("function"))
 
 
 def _r_argument_values(call) -> list:
@@ -438,11 +478,17 @@ def _r_argument_values(call) -> list:
 
 
 def _r_is_return_call(node, data: bytes) -> bool:
-    """`return(x)`, or a call handed one directly, such as `invisible(return(x))`."""
+    """`return(x)`, also in parentheses, or handed straight to another call.
+
+    `(return(x))` and `invisible(return(x))` both leave the function.
+    """
 
     pending = [node]
     while pending:
         current = pending.pop()
+        if current.type == "parenthesized_expression":
+            pending.extend(current.named_children)
+            continue
         if current.type != "call":
             continue
         if _r_called_name(current, data) == "return":

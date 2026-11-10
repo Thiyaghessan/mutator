@@ -466,3 +466,96 @@ def test_loose_scripts_with_testthat_are_tested_against_the_mutant(tmp_path, cap
     code = run(["--root", str(tmp_path), "--no-coverage", "R/box.R"])
     assert _killed_and_survived(capsys.readouterr().out) == EXPECTED_FOR_SIGN_OF
     assert code == 3
+
+
+@needs_testthat
+def test_a_package_in_a_subfolder_is_tested_against_the_mutant(tmp_path, capsys):
+    package = "packages/demo"
+    _write(
+        tmp_path,
+        f"{package}/DESCRIPTION",
+        "Package: demo\nTitle: Demo\nVersion: 0.0.1\nDescription: Demo.\nLicense: MIT\nEncoding: UTF-8\n",
+    )
+    _write(tmp_path, f"{package}/NAMESPACE", "export(sign_of)\n")
+    _write(tmp_path, f"{package}/R/box.R", PACKAGE_SOURCE)
+    _write(tmp_path, f"{package}/tests/testthat/helper-values.R", "expected_one <- 1\n")
+    _write(tmp_path, f"{package}/tests/testthat/test-box.R", PACKAGE_TEST)
+    code = run(["--root", str(tmp_path), "--no-coverage", f"{package}/R/box.R"])
+    assert _killed_and_survived(capsys.readouterr().out) == EXPECTED_FOR_SIGN_OF
+    assert code == 3
+
+
+def test_a_return_in_quotes_or_parentheses_is_still_a_return(tmp_path):
+    source = """quiet <- function(x) {
+  if (x == 1) {
+    "return"(1)
+  }
+  if (x == 2) {
+    (return(2))
+  }
+  if (x == 3) {
+    invisible((return(3)))
+  }
+  note(x)
+  4
+}
+"""
+    assert _deleted(tmp_path, source) == [
+        (2, "delete if (x == 1) { ..."),
+        (5, "delete if (x == 2) { ..."),
+        (8, "delete if (x == 3) { ..."),
+        (11, "delete note(x)"),
+    ]
+
+
+def test_a_site_in_a_body_covr_does_not_measure_alone_is_not_covered():
+    source = b"f <- function(x) {\n  while (FALSE) x <- x + 1\n}\n"
+    # covr gives one row for the whole loop on line 2, and it ran.
+    hits = ExpressionHits.from_rows(source, [(2, 3, 2, 26, 1)])
+    loop = source.index(b"while")
+    body = (source.index(b"x <- x + 1"), source.index(b"x <- x + 1") + len(b"x <- x + 1"))
+    one = source.index(b"1")
+    assert hits.covers(loop, loop + 24) is True
+    # The loop ran, which does not show that its body did.
+    assert hits.covers(one, one + 1, within=body) is False
+    # A row inside the body would show it.
+    measured = ExpressionHits.from_rows(source, [(2, 3, 2, 26, 1), (2, 17, 2, 26, 1)])
+    assert measured.covers(one, one + 1, within=body) is True
+
+
+LOOPS = """spin <- function(x) {
+  while (FALSE) x <- x + 1
+  for (i in integer(0)) x <- x + 2
+  while (x > 100) {
+    x <- x + 3
+  }
+  repeat break
+  f <- function(y) y + 5
+  x
+}
+tiny <- function(x) x + 6
+"""
+
+
+@needs_covr
+def test_real_coverage_does_not_claim_a_body_ran_when_covr_cannot_tell(tmp_path):
+    path = _write(tmp_path, "R/box.R", LOOPS)
+    _write(tmp_path, "tests/test_box.R", "stopifnot(spin(1) == 1, tiny(1) == 7)\n")
+    ensure_crapper().runners.run_coverage(tmp_path, [path], None)
+    hits = covered_lines(tmp_path, path, "r")
+    covered = {
+        (site.line, site.description): hits.covers(site.start, site.end, site.within)
+        for site in sites_in_file(LOOPS, path, tmp_path, "R/box.R")
+    }
+    # Bodies that never ran, with and without braces.
+    assert covered[(2, "1 -> 2")] is False
+    assert covered[(3, "2 -> 3")] is False
+    assert covered[(5, "3 -> 4")] is False
+    assert covered[(8, "5 -> 6")] is False
+    # Conditions that were evaluated, and whole statements that were reached.
+    assert covered[(3, "0 -> 1")] is True
+    assert covered[(4, "100 -> 101")] is True
+    assert covered[(2, "delete while (FALSE) x <- x + 1")] is True
+    assert covered[(8, "delete f <- function(y) y + 5")] is True
+    # A function whose whole body is one expression, and which ran.
+    assert covered[(11, "6 -> 7")] is True

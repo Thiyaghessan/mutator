@@ -249,8 +249,10 @@ class ExpressionHits:
             spans.append((start, end, hits))
         return cls(spans)
 
-    def covers(self, start: int, end: int) -> bool:
+    def covers(self, start: int, end: int, within: tuple[int, int] | None = None) -> bool:
         """True when the site at bytes `start` to `end` ran.
+
+        When `within` is given, only expressions inside those bytes count.
 
         The smallest measured expression round the start of the site decides.
         A site that starts on a word covr does not measure, such as the `if`
@@ -258,11 +260,14 @@ class ExpressionHits:
         expression inside it. A site with neither was never measured.
         """
 
-        around = [span for span in self.spans if span[0] <= start < span[1]]
+        spans = self.spans
+        if within is not None:
+            spans = [span for span in spans if within[0] <= span[0] and span[1] <= within[1]]
+        around = [span for span in spans if span[0] <= start < span[1]]
         if around:
             deciding = min(around, key=lambda span: span[1] - span[0])
             return deciding[2] > 0
-        inside = [span for span in self.spans if start <= span[0] < end]
+        inside = [span for span in spans if start <= span[0] < end]
         if inside:
             deciding = min(inside, key=lambda span: span[0])
             return deciding[2] > 0

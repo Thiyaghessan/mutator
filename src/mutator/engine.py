@@ -57,7 +57,7 @@ def _covered(site: Site, lines: set[int] | None, ignore_coverage: bool) -> bool:
     if lines is None:
         return False
     if isinstance(lines, ExpressionHits):
-        return lines.covers(site.start, site.end)
+        return lines.covers(site.start, site.end, site.within)
     return site.line in lines or site.anchor_line in lines
 
 

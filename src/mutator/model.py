@@ -31,6 +31,10 @@ class Site:
     mutation_id: str
     # The line its statement starts on; coverage on that line counts for the site.
     anchor_line: int = 0
+    # Bytes of the body the site sits in, when the coverage tool counts that
+    # body only as part of a larger statement. The site is covered only if
+    # something inside these bytes was measured and ran.
+    within: tuple[int, int] | None = None
 
     @property
     def description(self) -> str:

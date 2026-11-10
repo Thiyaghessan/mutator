@@ -289,9 +289,18 @@ def _real_folders(link: Path, real_dir: Path) -> None:
 
 
 def _keep_r_tests_in_the_worker(worker: Path, root: Path, relative: str) -> None:
+    """Make real every `tests` folder beside a folder above the R source.
+
+    That covers a package at the project root and one any number of folders
+    down, such as `packages/demo`.
+    """
+
     if not relative.endswith(_R_SUFFIXES):
         return
-    _real_folders(worker / _R_TEST_FOLDER, root / _R_TEST_FOLDER)
+    folders = Path(relative).parent.parts
+    for depth in range(len(folders) + 1):
+        holder = Path(*folders[:depth])
+        _real_folders(worker / holder / _R_TEST_FOLDER, root / holder / _R_TEST_FOLDER)
 
 
 def create_workers(
