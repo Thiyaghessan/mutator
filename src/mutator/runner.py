@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from mutator.crapper_link import ensure_crapper
+
 Command = str | list[str]
 
 
@@ -222,6 +224,44 @@ def _python_plan(root: Path, source: Path) -> tuple[Command, Path]:
     return _python_command(directory), directory
 
 
+# Runs each R test file named after the script in its own R process, and
+# stops with a failing exit code at the first one that fails.
+_R_RUN_EACH_TEST_FILE = """
+for (test_file in commandArgs(trailingOnly = TRUE)) {
+  exit_code <- system2("Rscript", shQuote(test_file))
+  if (exit_code != 0L) {
+    quit(status = 1L)
+  }
+}
+"""
+
+
+# Hands a testthat folder to testthat, which loads its helper and setup files.
+_R_RUN_TESTTHAT_FOLDER = (
+    "testthat::test_dir(commandArgs(trailingOnly = TRUE)[[1]], stop_on_failure = TRUE)"
+)
+
+
+def _r_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    """testthat for a package. For loose scripts, the tests crapper measures."""
+
+    directory = _nearest_marker(source, root, ("DESCRIPTION",))
+    if (directory / "DESCRIPTION").is_file():
+        return ["Rscript", "-e", "testthat::test_local(stop_on_failure = TRUE)"], directory
+    crapper = ensure_crapper()
+    testthat_folder = crapper.runners.r_testthat_folder(directory)
+    if testthat_folder is not None:
+        folder = testthat_folder.relative_to(directory).as_posix()
+        return ["Rscript", "-e", _R_RUN_TESTTHAT_FOLDER, folder], directory
+    test_files = [
+        path.relative_to(directory).as_posix()
+        for path in crapper.runners.r_test_files(directory)
+    ]
+    if not test_files:
+        return ["false"], directory
+    return ["Rscript", "-e", _R_RUN_EACH_TEST_FILE, *test_files], directory
+
+
 _PLANS = {
     "clojure": _clojure_plan,
     "java": _java_plan,
@@ -229,6 +269,7 @@ _PLANS = {
     "typescript": _typescript_plan,
     "rust": _rust_plan,
     "python": _python_plan,
+    "r": _r_plan,
 }
 
 

@@ -1,8 +1,8 @@
 # mutator
 
-Mutation testing for Clojure, Java, Go, TypeScript, Rust, and Python. One run detects the language of each source file, applies that language's mutation rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
+Mutation testing for Clojure, Java, Go, TypeScript, Rust, Python, and R. One run detects the language of each source file, applies that language's mutation rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
 
-Clojure follows [clj-mutate](https://github.com/unclebob/clj-mutate). Go follows [mutate4go](https://github.com/unclebob/mutate4go). Java follows [mutate4java](https://github.com/unclebob/mutate4java). TypeScript, Rust, and Python use the same decisions as Java, spelled in that language. Function names and namespaces come from [crapper](https://github.com/unclebob/crapper), which is what uml-viewer joins to `.metrics/crap.edn`.
+Clojure follows [clj-mutate](https://github.com/unclebob/clj-mutate). Go follows [mutate4go](https://github.com/unclebob/mutate4go). Java follows [mutate4java](https://github.com/unclebob/mutate4java). TypeScript, Rust, and Python use the same decisions as Java, spelled in that language. R has its own set, listed below. Function names and namespaces come from [crapper](https://github.com/unclebob/crapper), which is what uml-viewer joins to `.metrics/crap.edn`.
 
 A mutant is killed when the tests fail or time out. It survives when the tests still pass. A site on a line the coverage report does not hit is uncovered and is not run. The score uml-viewer paints is killed / (killed + survived).
 
@@ -83,8 +83,9 @@ uml-viewer loads every `*.edn` file under `.metrics/mutate`. Each file is one na
 | TypeScript | the dotted module path, or `module.Class` | the function or method name |
 | Rust | `crate::module`, or `crate::module::Type` | the function or method name |
 | Python | the dotted module path, or `module.Class` | the function or method name |
+| R | the dotted file path without the `R/` folder and the suffix | the function name |
 
-`defn-` is Clojure's private form. Elsewhere a private method, an unexported Go function, a Python name that starts with `_`, a Rust function that is not `pub`, or a TypeScript `private` / `#` name uses `defn-/`.
+`defn-` is Clojure's private form. Elsewhere a private method, an unexported Go function, a Python name that starts with `_`, a Rust function that is not `pub`, a TypeScript `private` / `#` name, or an R name that starts with `.` uses `defn-/`.
 
 ## What each language mutates
 
@@ -98,6 +99,7 @@ Tokens inside strings, comments, and quoted Clojure forms are left alone. A repl
 | TypeScript | the Java set, plus `===`/`!==`, `??` to `||`, and `?.` to `.`. A call or index drops `?.` (`a?.()` becomes `a()`). `.js`, `.jsx`, `.mjs`, and `.cjs` use these rules. |
 | Rust | the Java set (`&&`/`||`, `!`, unary `-`). |
 | Python | the Java set, spelled `and`/`or`, `not`, and `True`/`False`. |
+| R | `==`/`!=`, `<`/`<=`, `>`/`>=`, `&&`/`||`, `TRUE`/`FALSE`, a plain number plus one (`0` to `1`, `12L` to `13L`, `2.5` to `3.5`), the condition of an `if` or `while` negated (`x` to `!(x)`), and a statement inside braces deleted unless it is a return. A return is a call to `return(...)`, also when written with backticks or quotes, put in parentheses, or wrapped as in `invisible(return(x))`, or an expression whose value the function gives back: the last expression of the body and, when that is an `if` or a `switch`, the last expression of each branch. Arithmetic operators and the vectorised `&` and `|` are left alone. |
 
 ## Tests and coverage
 
@@ -111,8 +113,11 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | TypeScript | `npm test` | nearest `package.json` |
 | Rust | `cargo test` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
+| R | `testthat::test_local()` for a package. For loose scripts, `testthat::test_dir()` when `tests/testthat` holds the tests, otherwise each `tests/test*.R` file in its own `Rscript`, stopping at the first that fails | nearest `DESCRIPTION`, or the project root |
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
+
+For R, a site is covered when the smallest expression covr measured round it ran, so the branch of a one-line `if` that never ran is not tried and the branch that did run is. Some parts of a statement run only some of the time: a branch of an `if`, the body of a loop or of a function, an alternative of a `switch`, and the right side of `&&` or `||`. covr counts such a part by itself when it is inside braces, or is a branch of an `if` that stands as a statement, but not when it is buried in a larger statement, as in `y <- if (a) 1 else 2`, `while (a) x <- x + 1`, or `a && b > 1`. The larger statement having run does not show the part ran, so a site there is reported as uncovered and not tried. Uncovered here means not known to have run. Put the part in braces to have it measured; for the right side of `&&` or `||`, covr has no count, so those sites are tried only with `--no-coverage`. When only an LCOV report is on disk, the site's line decides. In an R worker every `tests` folder beside a folder above the source file is made of real folders, not a link, because R finds a package and relative paths from the real location of the running test.
 
 ## Development
 

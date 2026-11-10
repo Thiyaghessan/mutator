@@ -5,9 +5,13 @@ one-way `*` to `/`. Java follows mutate4java. TypeScript, Rust, and Python
 use the same decisions as Java, spelled in that language. TypeScript also
 mutates `??` to `||` and `?.` to `.` (removed on a call or index). JavaScript
 files use the TypeScript rules.
+
+R has its own set, listed above `_visit_r`.
 """
 
 from __future__ import annotations
+
+import re
 
 from mutator.crapper_link import ensure_crapper
 
@@ -94,7 +98,15 @@ _CLOJURE_HEAD = {
 
 class RawSite:
     def __init__(
-        self, line: int, start: int, end: int, original: str, mutant: str, category: str, anchor_line: int = 0
+        self,
+        line: int,
+        start: int,
+        end: int,
+        original: str,
+        mutant: str,
+        category: str,
+        anchor_line: int = 0,
+        within: tuple[int, int] | None = None,
     ):
         self.line = line
         # The line its statement starts on. LCOV marks only that line of a multi-line statement.
@@ -104,6 +116,8 @@ class RawSite:
         self.original = original
         self.mutant = mutant
         self.category = category
+        # See Site.within.
+        self.within = within
 
 
 def _grammar(language: str, path: str) -> str:
@@ -354,6 +368,283 @@ def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
         stack.extend(reversed(current.children))
 
 
+# R mutations, one site each:
+#
+# - a comparison is flipped: `==` and `!=`, `<` and `<=`, `>` and `>=`
+# - `&&` becomes `||`, and `||` becomes `&&`
+# - `TRUE` becomes `FALSE`, and `FALSE` becomes `TRUE`
+# - a plain number goes up by one: `0` to `1`, `12L` to `13L`, `2.5` to `3.5`
+# - the condition of an `if` or a `while` is negated: `x` to `!(x)`
+# - a statement inside braces is deleted, unless it is a return
+#
+# A return is one of two things. It is a call to `return(...)`, also when
+# written `` `return`(...) `` or `"return"(...)`, put in parentheses, or
+# wrapped as in `invisible(return(x))`. Or it
+# is an expression whose value the function gives back: the last expression
+# of the function body, and, when that is an `if` or a `switch`, the last
+# expression of each of its branches. Arithmetic operators are left alone.
+_R_FLIPPED_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "&&", "||"}
+_R_BOOLEANS = {"TRUE": "FALSE", "FALSE": "TRUE"}
+_R_NUMBERS = {"float", "integer"}
+_R_NEGATED_CONDITIONS = {"if_statement", "while_statement"}
+# Digits, an optional fraction, and an optional L. Hex and 1e3 do not match.
+_R_PLAIN_NUMBER = re.compile(r"(\d*)(\.\d*)?(L?)")
+
+
+def _r_field_of(node) -> str:
+    """The name of the field `node` fills in its parent, or an empty string."""
+
+    parent = node.parent
+    for index, child in enumerate(parent.children):
+        if child.id == node.id:
+            return parent.field_name_for_child(index) or ""
+    return ""
+
+
+# Some parts of a statement run only some of the time: a branch of an `if`,
+# the body of a loop or of a function, an alternative of a `switch`, and the
+# right side of `&&` or `||`, which R skips when the left side settles it. The
+# statement having run does not show that such a part ran. covr counts each
+# statement inside braces, and each branch of an `if` that stands as a
+# statement, but not a part buried in a larger statement, as in
+# `y <- if (a) 1 else 2`, `while (a) x <- x + 1`, or `a && b > 1`.
+#
+# So each site records the nearest such part round it, and is covered only
+# when something measured inside that part ran. Where covr has no count, the
+# site is reported as uncovered, which here means "not known to have run".
+#
+# A function is measured under its whole `function(...)` expression, which is
+# where covr puts the count for a body without braces.
+_R_LOOPS = {"while_statement", "repeat_statement", "for_statement"}
+_R_IF_BRANCHES = {"consequence", "alternative"}
+_R_SKIPS_ITS_RIGHT_SIDE = {"&&", "||"}
+
+
+def _r_is_skippable_right_side(node) -> bool:
+    """True for `b` in `a && b` or `a || b`."""
+
+    parent = node.parent
+    if parent.type != "binary_operator" or _r_field_of(node) != "rhs":
+        return False
+    operator = parent.child_by_field_name("operator")
+    return operator is not None and operator.type in _R_SKIPS_ITS_RIGHT_SIDE
+
+
+def _r_is_switch_alternative(node, data: bytes) -> bool:
+    """True for the value of any argument of `switch(...)` after the first."""
+
+    argument = node.parent
+    if argument.type != "argument" or _r_field_of(node) != "value":
+        return False
+    call = argument.parent.parent
+    if call is None or call.type != "call" or _r_called_name(call, data) != "switch":
+        return False
+    first = next(child for child in argument.parent.children if child.type == "argument")
+    return first.id != argument.id
+
+
+def _r_part_that_must_be_measured(node, data: bytes):
+    """`node` itself or its parent when `node` runs only some of the time, else None."""
+
+    parent = node.parent
+    field = _r_field_of(node)
+    if parent.type == "function_definition" and field == "body":
+        return parent
+    if parent.type in _R_LOOPS and field == "body":
+        return node
+    if parent.type == "if_statement" and field in _R_IF_BRANCHES:
+        return node
+    if _r_is_switch_alternative(node, data):
+        return node
+    if _r_is_skippable_right_side(node):
+        return node
+    return None
+
+
+def _r_measured_within(node, data: bytes) -> tuple[int, int] | None:
+    """Bytes that must hold a count that ran for a site at `node` to be covered."""
+
+    current = node
+    while current.parent is not None:
+        part = _r_part_that_must_be_measured(current, data)
+        if part is not None:
+            return part.start_byte, part.end_byte
+        current = current.parent
+    return None
+
+
+def _add_r(
+    found: list[RawSite], node, data: bytes, original: str, mutant: str, category: str
+) -> None:
+    found.append(
+        RawSite(
+            line=node.start_point[0] + 1,
+            start=node.start_byte,
+            end=node.end_byte,
+            original=original,
+            mutant=mutant,
+            category=category,
+            within=_r_measured_within(node, data),
+        )
+    )
+
+
+def _r_number_plus_one(text: str) -> str | None:
+    match = _R_PLAIN_NUMBER.fullmatch(text)
+    if match is None or not any(character.isdigit() for character in text):
+        return None
+    whole, fraction, suffix = match.groups()
+    return f"{int(whole or '0') + 1}{fraction or ''}{suffix}"
+
+
+def _r_is_operator(node) -> bool:
+    parent = node.parent
+    return parent is not None and parent.type == "binary_operator" and _r_field_of(node) == "operator"
+
+
+def _r_called_name(node, data: bytes) -> str:
+    """The name a call names, read the way crapper reads R names, or "" when it has none."""
+
+    crapper = ensure_crapper()
+    return crapper.languages.r.plain_name(data, node.child_by_field_name("function"))
+
+
+def _r_argument_values(call) -> list:
+    arguments = call.child_by_field_name("arguments")
+    if arguments is None:
+        return []
+    values = []
+    for argument in arguments.children:
+        value = argument.child_by_field_name("value") if argument.type == "argument" else None
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _r_is_return_call(node, data: bytes) -> bool:
+    """`return(x)`, also in parentheses, or handed straight to another call.
+
+    `(return(x))` and `invisible(return(x))` both leave the function.
+    """
+
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current.type == "parenthesized_expression":
+            pending.extend(current.named_children)
+            continue
+        if current.type != "call":
+            continue
+        if _r_called_name(current, data) == "return":
+            return True
+        pending.extend(_r_argument_values(current))
+    return False
+
+
+def _r_statements(block) -> list:
+    return [
+        child
+        for index, child in enumerate(block.children)
+        if block.field_name_for_child(index) == "body"
+    ]
+
+
+def _r_passes_its_value_up(node, data: bytes):
+    """The node whose value is the value of `node`, or None when there is none.
+
+    The last statement of a block is the value of the block. A branch of an
+    `if` is the value of the `if`. An alternative of a `switch` is the value
+    of the `switch`.
+    """
+
+    parent = node.parent
+    if parent.type == "braced_expression":
+        statements = _r_statements(parent)
+        if statements and statements[-1].id == node.id:
+            return parent
+        return None
+    if parent.type == "if_statement" and _r_field_of(node) in {"consequence", "alternative"}:
+        return parent
+    if parent.type == "parenthesized_expression":
+        return parent
+    if parent.type == "argument":
+        call = parent.parent.parent
+        if call.type == "call" and _r_called_name(call, data) == "switch":
+            return call
+    return None
+
+
+def _r_gives_the_function_value(node, data: bytes) -> bool:
+    """True when the value of `node` is what its function gives back."""
+
+    current = node
+    while current is not None:
+        parent = current.parent
+        if parent is None:
+            return False
+        if parent.type == "function_definition":
+            return _r_field_of(current) == "body"
+        current = _r_passes_its_value_up(current, data)
+    return False
+
+
+def _r_is_return(statement, data: bytes) -> bool:
+    return _r_is_return_call(statement, data) or _r_gives_the_function_value(statement, data)
+
+
+def _r_deletable_statements(block, data: bytes) -> list:
+    return [
+        statement for statement in _r_statements(block) if not _r_is_return(statement, data)
+    ]
+
+
+def _visit_r_token(node, data: bytes, found: list[RawSite]) -> None:
+    token = _text(data, node)
+    if token in _R_FLIPPED_OPERATORS and _r_is_operator(node):
+        _add_r(found, node, data, token, _BINARY[token], _category(token))
+    elif node.type in {"true", "false"} and token in _R_BOOLEANS:
+        _add_r(found, node, data, token, _R_BOOLEANS[token], "boolean")
+
+
+def _visit_r_number(node, data: bytes, found: list[RawSite]) -> None:
+    text = _text(data, node)
+    raised = _r_number_plus_one(text)
+    if raised is not None:
+        _add_r(found, node, data, text, raised, "constant")
+
+
+def _visit_r_condition(node, data: bytes, found: list[RawSite]) -> None:
+    condition = node.child_by_field_name("condition")
+    if condition is not None:
+        text = _text(data, condition)
+        _add_r(found, condition, data, text, f"!({text})", "conditional")
+
+
+def _visit_r_block(node, data: bytes, found: list[RawSite]) -> None:
+    for statement in _r_deletable_statements(node, data):
+        _add_r(found, statement, data, _text(data, statement), "", "statement")
+
+
+def _visit_r_node(node, data: bytes, found: list[RawSite]) -> None:
+    if node.type in _R_NUMBERS:
+        _visit_r_number(node, data, found)
+    elif node.child_count == 0:
+        _visit_r_token(node, data, found)
+    elif node.type in _R_NEGATED_CONDITIONS:
+        _visit_r_condition(node, data, found)
+    elif node.type == "braced_expression":
+        _visit_r_block(node, data, found)
+
+
+def _visit_r(node, data: bytes, found: list[RawSite]) -> None:
+    # An explicit stack: a 1,200-term expression must not raise RecursionError.
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        _visit_r_node(current, data, found)
+        stack.extend(reversed(current.children))
+
+
 def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     """Mutation sites in source order. Offsets are UTF-8 byte offsets."""
 
@@ -364,6 +655,8 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     found: list[RawSite] = []
     if language == "clojure":
         _visit_clojure(tree.root_node, data, found)
+    elif language == "r":
+        _visit_r(tree.root_node, data, found)
     else:
         _visit(tree.root_node, data, language, found)
     found.sort(key=lambda site: (site.line, site.start, site.end))

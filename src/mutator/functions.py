@@ -62,6 +62,9 @@ def is_private(language: str, name: str, source: str, start: int, end: int) -> b
         return re.match(r"pub\s", header) is None
     if language == "typescript":
         return _typescript_private(name, header)
+    if language == "r":
+        # R hides a name that starts with a dot from ls() by default.
+        return name.startswith(".")
     return False
 
 
@@ -172,6 +175,7 @@ def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Si
                     file_key, owner.namespace, form, raw.start, raw.end, raw.original, raw.mutant
                 ),
                 anchor_line=raw.anchor_line,
+                within=raw.within,
             )
         )
     return found

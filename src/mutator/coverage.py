@@ -2,8 +2,10 @@
 
 Java uses JaCoCo source lines. Go uses statement profiles, which name a
 file by its module import path, the way crapper names it. Clojure prefers
-Cloverage's per-line form counts, then LCOV. The other languages use LCOV.
-A file that does not appear in a report has no coverage data.
+Cloverage's per-line form counts, then LCOV. R uses covr's count for each
+expression, because one R line can hold a part that ran and a part that did
+not; it falls back to LCOV when only that was written. The other languages
+use LCOV. A file that does not appear in a report has no coverage data.
 """
 
 from __future__ import annotations
@@ -216,8 +218,77 @@ def _go_lines(root: Path, profile, source_path: str) -> set[int] | None:
     return covered
 
 
-def covered_lines(root: Path, source_path: Path, language: str) -> set[int] | None:
-    """Lines with a hit, or None when this file is absent from coverage."""
+class ExpressionHits:
+    """Which parts of one R file ran, from covr's count for each expression.
+
+    A span is (first byte, byte after the last, times run), counted from the
+    start of the file.
+    """
+
+    def __init__(self, spans: list[tuple[int, int, int]]):
+        self.spans = spans
+
+    @classmethod
+    def from_rows(cls, source: bytes, rows) -> "ExpressionHits":
+        """Build from covr rows: (first line, first byte, last line, last byte, times run).
+
+        covr counts lines and bytes from 1, and its last byte is part of the
+        expression.
+        """
+
+        line_starts = [0]
+        for index, byte in enumerate(source):
+            if byte == 0x0A:
+                line_starts.append(index + 1)
+        spans = []
+        for first_line, first_byte, last_line, last_byte, hits in rows:
+            if first_line > len(line_starts) or last_line > len(line_starts):
+                continue
+            start = line_starts[first_line - 1] + first_byte - 1
+            end = line_starts[last_line - 1] + last_byte
+            spans.append((start, end, hits))
+        return cls(spans)
+
+    def covers(self, start: int, end: int, within: tuple[int, int] | None = None) -> bool:
+        """True when the site at bytes `start` to `end` ran.
+
+        When `within` is given, only expressions inside those bytes count.
+
+        The smallest measured expression round the start of the site decides.
+        A site that starts on a word covr does not measure, such as the `if`
+        of a whole `if` statement, is decided by the first measured
+        expression inside it. A site with neither was never measured.
+        """
+
+        spans = self.spans
+        if within is not None:
+            spans = [span for span in spans if within[0] <= span[0] and span[1] <= within[1]]
+        around = [span for span in spans if span[0] <= start < span[1]]
+        if around:
+            deciding = min(around, key=lambda span: span[1] - span[0])
+            return deciding[2] > 0
+        inside = [span for span in spans if start <= span[0] < end]
+        if inside:
+            deciding = min(inside, key=lambda span: span[0])
+            return deciding[2] > 0
+        return False
+
+
+def _r_expression_hits(bundle, source_path: Path, path: str) -> ExpressionHits | None:
+    rows = _lookup(bundle.r_expressions, path)
+    if rows is None:
+        return None
+    return ExpressionHits.from_rows(source_path.read_bytes(), rows)
+
+
+def covered_lines(
+    root: Path, source_path: Path, language: str
+) -> set[int] | ExpressionHits | None:
+    """Lines with a hit, or None when this file is absent from coverage.
+
+    For R the answer is an `ExpressionHits` when covr's per-expression counts
+    are on disk.
+    """
 
     crapper = ensure_crapper()
     path = source_path.resolve().as_posix()
@@ -230,4 +301,8 @@ def covered_lines(root: Path, source_path: Path, language: str) -> set[int] | No
         html = _covered_from_pairs(_lookup(bundle.form_html, path))
         if html is not None:
             return html
+    if language == "r":
+        expressions = _r_expression_hits(bundle, source_path, path)
+        if expressions is not None:
+            return expressions
     return _covered_from_pairs(_lookup(bundle.lcov, path))

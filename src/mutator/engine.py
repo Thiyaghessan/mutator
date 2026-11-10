@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from mutator.coverage import ExpressionHits
 from mutator.crapper_link import ensure_crapper
 from mutator.functions import form_digests, form_spans, sites_in_file
 from mutator.metrics import load_history, source_key, write_results
@@ -55,6 +56,8 @@ def _covered(site: Site, lines: set[int] | None, ignore_coverage: bool) -> bool:
         return True
     if lines is None:
         return False
+    if isinstance(lines, ExpressionHits):
+        return lines.covers(site.start, site.end, site.within)
     return site.line in lines or site.anchor_line in lines
 
 

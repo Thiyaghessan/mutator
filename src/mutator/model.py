@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def _one_line(text: str) -> str:
+    """The first line of `text`, marked when more lines follow, so a report row stays one row."""
+
+    first, *rest = text.split("\n")
+    if not rest:
+        return text
+    return f"{first} ..."
+
+
 @dataclass(frozen=True)
 class Site:
     """One replacement inside a function crapper would score."""
@@ -22,12 +31,16 @@ class Site:
     mutation_id: str
     # The line its statement starts on; coverage on that line counts for the site.
     anchor_line: int = 0
+    # Bytes of the body the site sits in, when the coverage tool counts that
+    # body only as part of a larger statement. The site is covered only if
+    # something inside these bytes was measured and ran.
+    within: tuple[int, int] | None = None
 
     @property
     def description(self) -> str:
         if self.mutant == "":
-            return f"delete {self.original}"
-        return f"{self.original} -> {self.mutant}"
+            return f"delete {_one_line(self.original)}"
+        return f"{_one_line(self.original)} -> {_one_line(self.mutant)}"
 
 
 @dataclass
