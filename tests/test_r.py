@@ -559,3 +559,39 @@ def test_real_coverage_does_not_claim_a_body_ran_when_covr_cannot_tell(tmp_path)
     assert covered[(8, "delete f <- function(y) y + 5")] is True
     # A function whose whole body is one expression, and which ran.
     assert covered[(11, "6 -> 7")] is True
+
+
+ASSIGNED_CONDITIONAL = """f <- function(x) {
+  result <- if(x) 1 else if(
+    FALSE
+  ) 2 else 3
+  kind <- switch(x + 1, 4, 5)
+  result
+}
+"""
+
+
+@needs_covr
+def test_a_part_that_runs_only_sometimes_needs_a_count_of_its_own(tmp_path):
+    path = _write(tmp_path, "R/box.R", ASSIGNED_CONDITIONAL)
+    _write(tmp_path, "tests/test_box.R", "stopifnot(f(TRUE) == 1)\n")
+    ensure_crapper().runners.run_coverage(tmp_path, [path], None)
+    hits = covered_lines(tmp_path, path, "r")
+    covered = {
+        (site.line, site.description): hits.covers(site.start, site.end, site.within)
+        for site in sites_in_file(ASSIGNED_CONDITIONAL, path, tmp_path, "R/box.R")
+    }
+    # covr gives one count for each whole assignment. The first condition is
+    # always evaluated when the assignment runs.
+    assert covered[(2, "delete result <- if(x) 1 else if( ...")] is True
+    assert covered[(2, "x -> !(x)")] is True
+    assert covered[(5, "1 -> 2")] is True
+    # A branch, the second condition, and a switch alternative run only
+    # sometimes, and covr has no count for them, so none is claimed to have run.
+    assert covered[(2, "1 -> 2")] is False
+    assert covered[(3, "FALSE -> TRUE")] is False
+    assert covered[(3, "FALSE -> !(FALSE)")] is False
+    assert covered[(4, "2 -> 3")] is False
+    assert covered[(4, "3 -> 4")] is False
+    assert covered[(5, "4 -> 5")] is False
+    assert covered[(5, "5 -> 6")] is False

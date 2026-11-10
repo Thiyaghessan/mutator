@@ -401,37 +401,67 @@ def _r_field_of(node) -> str:
     return ""
 
 
-# covr counts a statement inside braces by itself. A body written without
-# braces after `while`, `repeat`, or `function` is counted only as part of the
-# statement that holds it, so that statement having run does not show the
-# body ran. `for` is listed for the same reason, though covr does count its
-# body.
+# Some parts of a statement run only some of the time: a branch of an `if`,
+# the body of a loop or of a function, an alternative of a `switch`. The
+# statement having run does not show that such a part ran. covr counts each
+# statement inside braces, and each branch of an `if` that stands as a
+# statement, but not a part buried in a larger statement, as in
+# `y <- if (a) 1 else 2` or `while (a) x <- x + 1`.
 #
-# A function is the one case with a count of its own: for a function assigned
-# at the top of a file, covr counts the body under the whole `function(...)`
-# expression. So for a function the bytes that must hold a count are those of
-# the `function(...)` expression, and for a loop they are those of the body.
-_R_BODY_OWNERS = {"while_statement", "repeat_statement", "for_statement", "function_definition"}
+# So each site records the nearest such part round it, and is covered only
+# when something measured inside that part ran. Where covr has no count, the
+# site is reported as uncovered, which here means "not known to have run".
+#
+# A function is measured under its whole `function(...)` expression, which is
+# where covr puts the count for a body without braces.
+_R_LOOPS = {"while_statement", "repeat_statement", "for_statement"}
+_R_IF_BRANCHES = {"consequence", "alternative"}
 
 
-def _r_body_without_braces(node) -> tuple[int, int] | None:
-    """Bytes that must hold a count for `node`, when its nearest body has no braces."""
+def _r_is_switch_alternative(node, data: bytes) -> bool:
+    """True for the value of any argument of `switch(...)` after the first."""
 
-    current = node
-    while current.parent is not None:
-        parent = current.parent
-        if (
-            parent.type in _R_BODY_OWNERS
-            and current.type != "braced_expression"
-            and _r_field_of(current) == "body"
-        ):
-            measured = parent if parent.type == "function_definition" else current
-            return measured.start_byte, measured.end_byte
-        current = parent
+    argument = node.parent
+    if argument.type != "argument" or _r_field_of(node) != "value":
+        return False
+    call = argument.parent.parent
+    if call is None or call.type != "call" or _r_called_name(call, data) != "switch":
+        return False
+    first = next(child for child in argument.parent.children if child.type == "argument")
+    return first.id != argument.id
+
+
+def _r_part_that_must_be_measured(node, data: bytes):
+    """`node` itself or its parent when `node` runs only some of the time, else None."""
+
+    parent = node.parent
+    field = _r_field_of(node)
+    if parent.type == "function_definition" and field == "body":
+        return parent
+    if parent.type in _R_LOOPS and field == "body":
+        return node
+    if parent.type == "if_statement" and field in _R_IF_BRANCHES:
+        return node
+    if _r_is_switch_alternative(node, data):
+        return node
     return None
 
 
-def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str) -> None:
+def _r_measured_within(node, data: bytes) -> tuple[int, int] | None:
+    """Bytes that must hold a count that ran for a site at `node` to be covered."""
+
+    current = node
+    while current.parent is not None:
+        part = _r_part_that_must_be_measured(current, data)
+        if part is not None:
+            return part.start_byte, part.end_byte
+        current = current.parent
+    return None
+
+
+def _add_r(
+    found: list[RawSite], node, data: bytes, original: str, mutant: str, category: str
+) -> None:
     found.append(
         RawSite(
             line=node.start_point[0] + 1,
@@ -440,7 +470,7 @@ def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str
             original=original,
             mutant=mutant,
             category=category,
-            within=_r_body_without_braces(node),
+            within=_r_measured_within(node, data),
         )
     )
 
@@ -557,28 +587,28 @@ def _r_deletable_statements(block, data: bytes) -> list:
 def _visit_r_token(node, data: bytes, found: list[RawSite]) -> None:
     token = _text(data, node)
     if token in _R_FLIPPED_OPERATORS and _r_is_operator(node):
-        _add_r(found, node, token, _BINARY[token], _category(token))
+        _add_r(found, node, data, token, _BINARY[token], _category(token))
     elif node.type in {"true", "false"} and token in _R_BOOLEANS:
-        _add_r(found, node, token, _R_BOOLEANS[token], "boolean")
+        _add_r(found, node, data, token, _R_BOOLEANS[token], "boolean")
 
 
 def _visit_r_number(node, data: bytes, found: list[RawSite]) -> None:
     text = _text(data, node)
     raised = _r_number_plus_one(text)
     if raised is not None:
-        _add_r(found, node, text, raised, "constant")
+        _add_r(found, node, data, text, raised, "constant")
 
 
 def _visit_r_condition(node, data: bytes, found: list[RawSite]) -> None:
     condition = node.child_by_field_name("condition")
     if condition is not None:
         text = _text(data, condition)
-        _add_r(found, condition, text, f"!({text})", "conditional")
+        _add_r(found, condition, data, text, f"!({text})", "conditional")
 
 
 def _visit_r_block(node, data: bytes, found: list[RawSite]) -> None:
     for statement in _r_deletable_statements(node, data):
-        _add_r(found, statement, _text(data, statement), "", "statement")
+        _add_r(found, statement, data, _text(data, statement), "", "statement")
 
 
 def _visit_r_node(node, data: bytes, found: list[RawSite]) -> None:
