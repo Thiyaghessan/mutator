@@ -5,9 +5,13 @@ one-way `*` to `/`. Java follows mutate4java. TypeScript, Rust, and Python
 use the same decisions as Java, spelled in that language. TypeScript also
 mutates `??` to `||` and `?.` to `.` (removed on a call or index). JavaScript
 files use the TypeScript rules.
+
+R has its own set, listed above `_visit_r`.
 """
 
 from __future__ import annotations
+
+import re
 
 from mutator.crapper_link import ensure_crapper
 
@@ -354,6 +358,167 @@ def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
         stack.extend(reversed(current.children))
 
 
+# R mutations, one site each:
+#
+# - a comparison is flipped: `==` and `!=`, `<` and `<=`, `>` and `>=`
+# - `&&` becomes `||`, and `||` becomes `&&`
+# - `TRUE` becomes `FALSE`, and `FALSE` becomes `TRUE`
+# - a plain number goes up by one: `0` to `1`, `12L` to `13L`, `2.5` to `3.5`
+# - the condition of an `if` or a `while` is negated: `x` to `!(x)`
+# - a statement inside braces is deleted, unless it is a return
+#
+# A return is a call to `return(...)`, or the last expression of a function
+# body, which is the value R gives back. Arithmetic operators are left alone.
+_R_FLIPPED_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "&&", "||"}
+_R_BOOLEANS = {"TRUE": "FALSE", "FALSE": "TRUE"}
+_R_NUMBERS = {"float", "integer"}
+_R_NEGATED_CONDITIONS = {"if_statement", "while_statement"}
+# Digits, an optional fraction, and an optional L. Hex and 1e3 do not match.
+_R_PLAIN_NUMBER = re.compile(r"(\d*)(\.\d*)?(L?)")
+# Nodes whose parts after the condition run only some of the time.
+_R_BRANCHING = {
+    "if_statement",
+    "for_statement",
+    "while_statement",
+    "repeat_statement",
+    "function_definition",
+}
+_R_ALWAYS_EVALUATED_FIELDS = {"condition", "sequence", "variable", "parameters"}
+
+
+def _r_field_of(node) -> str:
+    """The name of the field `node` fills in its parent, or an empty string."""
+
+    parent = node.parent
+    for index, child in enumerate(parent.children):
+        if child.id == node.id:
+            return parent.field_name_for_child(index) or ""
+    return ""
+
+
+def _r_is_own_statement(node) -> bool:
+    """True when `node` runs as a unit: a statement in braces, or a branch body."""
+
+    parent = node.parent
+    if parent.type == "braced_expression":
+        return True
+    if parent.type not in _R_BRANCHING:
+        return False
+    return _r_field_of(node) not in _R_ALWAYS_EVALUATED_FIELDS
+
+
+def _r_statement_line(node) -> int:
+    """The line the statement holding `node` starts on.
+
+    covr marks a statement on the line it starts. A site in the condition of
+    an `if` belongs to the statement that holds the `if`. A site inside the
+    braces belongs to its own statement there.
+    """
+
+    current = node
+    while current.parent is not None:
+        if _r_is_own_statement(current):
+            return current.start_point[0] + 1
+        current = current.parent
+    return node.start_point[0] + 1
+
+
+def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str) -> None:
+    found.append(
+        RawSite(
+            line=node.start_point[0] + 1,
+            start=node.start_byte,
+            end=node.end_byte,
+            original=original,
+            mutant=mutant,
+            category=category,
+            anchor_line=_r_statement_line(node),
+        )
+    )
+
+
+def _r_number_plus_one(text: str) -> str | None:
+    match = _R_PLAIN_NUMBER.fullmatch(text)
+    if match is None or not any(character.isdigit() for character in text):
+        return None
+    whole, fraction, suffix = match.groups()
+    return f"{int(whole or '0') + 1}{fraction or ''}{suffix}"
+
+
+def _r_is_operator(node) -> bool:
+    parent = node.parent
+    return parent is not None and parent.type == "binary_operator" and _r_field_of(node) == "operator"
+
+
+def _r_is_return_call(node, data: bytes) -> bool:
+    if node.type != "call":
+        return False
+    function = node.child_by_field_name("function")
+    return function is not None and _text(data, function) == "return"
+
+
+def _r_statements(block) -> list:
+    return [
+        child
+        for index, child in enumerate(block.children)
+        if block.field_name_for_child(index) == "body"
+    ]
+
+
+def _r_deletable_statements(block, data: bytes) -> list:
+    statements = _r_statements(block)
+    if block.parent is not None and block.parent.type == "function_definition":
+        statements = statements[:-1]
+    return [statement for statement in statements if not _r_is_return_call(statement, data)]
+
+
+def _visit_r_token(node, data: bytes, found: list[RawSite]) -> None:
+    token = _text(data, node)
+    if token in _R_FLIPPED_OPERATORS and _r_is_operator(node):
+        _add_r(found, node, token, _BINARY[token], _category(token))
+    elif node.type in {"true", "false"} and token in _R_BOOLEANS:
+        _add_r(found, node, token, _R_BOOLEANS[token], "boolean")
+
+
+def _visit_r_number(node, data: bytes, found: list[RawSite]) -> None:
+    text = _text(data, node)
+    raised = _r_number_plus_one(text)
+    if raised is not None:
+        _add_r(found, node, text, raised, "constant")
+
+
+def _visit_r_condition(node, data: bytes, found: list[RawSite]) -> None:
+    condition = node.child_by_field_name("condition")
+    if condition is not None:
+        text = _text(data, condition)
+        _add_r(found, condition, text, f"!({text})", "conditional")
+
+
+def _visit_r_block(node, data: bytes, found: list[RawSite]) -> None:
+    for statement in _r_deletable_statements(node, data):
+        _add_r(found, statement, _text(data, statement), "", "statement")
+
+
+def _visit_r_node(node, data: bytes, found: list[RawSite]) -> None:
+    if node.type in _R_NUMBERS:
+        _visit_r_number(node, data, found)
+    elif node.child_count == 0:
+        _visit_r_token(node, data, found)
+    elif node.type in _R_NEGATED_CONDITIONS:
+        _visit_r_condition(node, data, found)
+    elif node.type == "braced_expression":
+        _visit_r_block(node, data, found)
+
+
+def _visit_r(node, data: bytes, found: list[RawSite]) -> None:
+    # An explicit stack: a 1,200-term expression must not raise RecursionError.
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        _visit_r_node(current, data, found)
+        stack.extend(reversed(current.children))
+
+
 def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     """Mutation sites in source order. Offsets are UTF-8 byte offsets."""
 
@@ -364,6 +529,8 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     found: list[RawSite] = []
     if language == "clojure":
         _visit_clojure(tree.root_node, data, found)
+    elif language == "r":
+        _visit_r(tree.root_node, data, found)
     else:
         _visit(tree.root_node, data, language, found)
     found.sort(key=lambda site: (site.line, site.start, site.end))
