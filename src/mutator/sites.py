@@ -402,11 +402,12 @@ def _r_field_of(node) -> str:
 
 
 # Some parts of a statement run only some of the time: a branch of an `if`,
-# the body of a loop or of a function, an alternative of a `switch`. The
+# the body of a loop or of a function, an alternative of a `switch`, and the
+# right side of `&&` or `||`, which R skips when the left side settles it. The
 # statement having run does not show that such a part ran. covr counts each
 # statement inside braces, and each branch of an `if` that stands as a
 # statement, but not a part buried in a larger statement, as in
-# `y <- if (a) 1 else 2` or `while (a) x <- x + 1`.
+# `y <- if (a) 1 else 2`, `while (a) x <- x + 1`, or `a && b > 1`.
 #
 # So each site records the nearest such part round it, and is covered only
 # when something measured inside that part ran. Where covr has no count, the
@@ -416,6 +417,17 @@ def _r_field_of(node) -> str:
 # where covr puts the count for a body without braces.
 _R_LOOPS = {"while_statement", "repeat_statement", "for_statement"}
 _R_IF_BRANCHES = {"consequence", "alternative"}
+_R_SKIPS_ITS_RIGHT_SIDE = {"&&", "||"}
+
+
+def _r_is_skippable_right_side(node) -> bool:
+    """True for `b` in `a && b` or `a || b`."""
+
+    parent = node.parent
+    if parent.type != "binary_operator" or _r_field_of(node) != "rhs":
+        return False
+    operator = parent.child_by_field_name("operator")
+    return operator is not None and operator.type in _R_SKIPS_ITS_RIGHT_SIDE
 
 
 def _r_is_switch_alternative(node, data: bytes) -> bool:
@@ -443,6 +455,8 @@ def _r_part_that_must_be_measured(node, data: bytes):
     if parent.type == "if_statement" and field in _R_IF_BRANCHES:
         return node
     if _r_is_switch_alternative(node, data):
+        return node
+    if _r_is_skippable_right_side(node):
         return node
     return None
 

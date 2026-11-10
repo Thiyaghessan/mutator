@@ -595,3 +595,43 @@ def test_a_part_that_runs_only_sometimes_needs_a_count_of_its_own(tmp_path):
     assert covered[(4, "3 -> 4")] is False
     assert covered[(5, "4 -> 5")] is False
     assert covered[(5, "5 -> 6")] is False
+
+
+SHORT_CIRCUIT = """gate <- function(x) {
+  ok <- FALSE && (x > 1 || x < 0)
+  if (x > 2 && x < 9) {
+    x <- 3
+  }
+  ok
+}
+"""
+
+
+@needs_covr
+def test_the_right_side_of_and_and_or_needs_a_count_of_its_own(tmp_path):
+    path = _write(tmp_path, "R/box.R", SHORT_CIRCUIT)
+    _write(tmp_path, "tests/test_box.R", "stopifnot(gate(5) == FALSE)\n")
+    ensure_crapper().runners.run_coverage(tmp_path, [path], None)
+    hits = covered_lines(tmp_path, path, "r")
+    covered = {
+        (site.line, site.description): hits.covers(site.start, site.end, site.within)
+        for site in sites_in_file(SHORT_CIRCUIT, path, tmp_path, "R/box.R")
+    }
+    # The left side and the operator itself always run with the statement.
+    assert covered[(2, "FALSE -> TRUE")] is True
+    assert covered[(2, "&& -> ||")] is True
+    assert covered[(3, "> -> >=")] is True
+    assert covered[(3, "2 -> 3")] is True
+    assert covered[(3, "&& -> ||")] is True
+    assert covered[(3, "x > 2 && x < 9 -> !(x > 2 && x < 9)")] is True
+    # The right side of FALSE && (...) never ran, and covr has no count for it.
+    assert covered[(2, "> -> >=")] is False
+    assert covered[(2, "1 -> 2")] is False
+    assert covered[(2, "|| -> &&")] is False
+    assert covered[(2, "< -> <=")] is False
+    assert covered[(2, "0 -> 1")] is False
+    # This right side did run, but covr cannot show it, so it is not claimed.
+    assert covered[(3, "< -> <=")] is False
+    assert covered[(3, "9 -> 10")] is False
+    # A statement in braces has its own count.
+    assert covered[(4, "3 -> 4")] is True
