@@ -367,23 +367,17 @@ def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
 # - the condition of an `if` or a `while` is negated: `x` to `!(x)`
 # - a statement inside braces is deleted, unless it is a return
 #
-# A return is a call to `return(...)`, or the last expression of a function
-# body, which is the value R gives back. Arithmetic operators are left alone.
+# A return is one of two things. It is a call to `return(...)`, also when
+# written `` `return`(...) `` or wrapped as in `invisible(return(x))`. Or it
+# is an expression whose value the function gives back: the last expression
+# of the function body, and, when that is an `if` or a `switch`, the last
+# expression of each of its branches. Arithmetic operators are left alone.
 _R_FLIPPED_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "&&", "||"}
 _R_BOOLEANS = {"TRUE": "FALSE", "FALSE": "TRUE"}
 _R_NUMBERS = {"float", "integer"}
 _R_NEGATED_CONDITIONS = {"if_statement", "while_statement"}
 # Digits, an optional fraction, and an optional L. Hex and 1e3 do not match.
 _R_PLAIN_NUMBER = re.compile(r"(\d*)(\.\d*)?(L?)")
-# Nodes whose parts after the condition run only some of the time.
-_R_BRANCHING = {
-    "if_statement",
-    "for_statement",
-    "while_statement",
-    "repeat_statement",
-    "function_definition",
-}
-_R_ALWAYS_EVALUATED_FIELDS = {"condition", "sequence", "variable", "parameters"}
 
 
 def _r_field_of(node) -> str:
@@ -396,33 +390,6 @@ def _r_field_of(node) -> str:
     return ""
 
 
-def _r_is_own_statement(node) -> bool:
-    """True when `node` runs as a unit: a statement in braces, or a branch body."""
-
-    parent = node.parent
-    if parent.type == "braced_expression":
-        return True
-    if parent.type not in _R_BRANCHING:
-        return False
-    return _r_field_of(node) not in _R_ALWAYS_EVALUATED_FIELDS
-
-
-def _r_statement_line(node) -> int:
-    """The line the statement holding `node` starts on.
-
-    covr marks a statement on the line it starts. A site in the condition of
-    an `if` belongs to the statement that holds the `if`. A site inside the
-    braces belongs to its own statement there.
-    """
-
-    current = node
-    while current.parent is not None:
-        if _r_is_own_statement(current):
-            return current.start_point[0] + 1
-        current = current.parent
-    return node.start_point[0] + 1
-
-
 def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str) -> None:
     found.append(
         RawSite(
@@ -432,7 +399,6 @@ def _add_r(found: list[RawSite], node, original: str, mutant: str, category: str
             original=original,
             mutant=mutant,
             category=category,
-            anchor_line=_r_statement_line(node),
         )
     )
 
@@ -450,11 +416,39 @@ def _r_is_operator(node) -> bool:
     return parent is not None and parent.type == "binary_operator" and _r_field_of(node) == "operator"
 
 
-def _r_is_return_call(node, data: bytes) -> bool:
-    if node.type != "call":
-        return False
+def _r_called_name(node, data: bytes) -> str:
+    """The plain name a call names, without backticks, or "" when it is not a plain name."""
+
     function = node.child_by_field_name("function")
-    return function is not None and _text(data, function) == "return"
+    if function is None or function.type != "identifier":
+        return ""
+    return _text(data, function).strip("`")
+
+
+def _r_argument_values(call) -> list:
+    arguments = call.child_by_field_name("arguments")
+    if arguments is None:
+        return []
+    values = []
+    for argument in arguments.children:
+        value = argument.child_by_field_name("value") if argument.type == "argument" else None
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _r_is_return_call(node, data: bytes) -> bool:
+    """`return(x)`, or a call handed one directly, such as `invisible(return(x))`."""
+
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current.type != "call":
+            continue
+        if _r_called_name(current, data) == "return":
+            return True
+        pending.extend(_r_argument_values(current))
+    return False
 
 
 def _r_statements(block) -> list:
@@ -465,11 +459,53 @@ def _r_statements(block) -> list:
     ]
 
 
+def _r_passes_its_value_up(node, data: bytes):
+    """The node whose value is the value of `node`, or None when there is none.
+
+    The last statement of a block is the value of the block. A branch of an
+    `if` is the value of the `if`. An alternative of a `switch` is the value
+    of the `switch`.
+    """
+
+    parent = node.parent
+    if parent.type == "braced_expression":
+        statements = _r_statements(parent)
+        if statements and statements[-1].id == node.id:
+            return parent
+        return None
+    if parent.type == "if_statement" and _r_field_of(node) in {"consequence", "alternative"}:
+        return parent
+    if parent.type == "parenthesized_expression":
+        return parent
+    if parent.type == "argument":
+        call = parent.parent.parent
+        if call.type == "call" and _r_called_name(call, data) == "switch":
+            return call
+    return None
+
+
+def _r_gives_the_function_value(node, data: bytes) -> bool:
+    """True when the value of `node` is what its function gives back."""
+
+    current = node
+    while current is not None:
+        parent = current.parent
+        if parent is None:
+            return False
+        if parent.type == "function_definition":
+            return _r_field_of(current) == "body"
+        current = _r_passes_its_value_up(current, data)
+    return False
+
+
+def _r_is_return(statement, data: bytes) -> bool:
+    return _r_is_return_call(statement, data) or _r_gives_the_function_value(statement, data)
+
+
 def _r_deletable_statements(block, data: bytes) -> list:
-    statements = _r_statements(block)
-    if block.parent is not None and block.parent.type == "function_definition":
-        statements = statements[:-1]
-    return [statement for statement in statements if not _r_is_return_call(statement, data)]
+    return [
+        statement for statement in _r_statements(block) if not _r_is_return(statement, data)
+    ]
 
 
 def _visit_r_token(node, data: bytes, found: list[RawSite]) -> None:

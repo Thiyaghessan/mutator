@@ -99,7 +99,7 @@ Tokens inside strings, comments, and quoted Clojure forms are left alone. A repl
 | TypeScript | the Java set, plus `===`/`!==`, `??` to `||`, and `?.` to `.`. A call or index drops `?.` (`a?.()` becomes `a()`). `.js`, `.jsx`, `.mjs`, and `.cjs` use these rules. |
 | Rust | the Java set (`&&`/`||`, `!`, unary `-`). |
 | Python | the Java set, spelled `and`/`or`, `not`, and `True`/`False`. |
-| R | `==`/`!=`, `<`/`<=`, `>`/`>=`, `&&`/`||`, `TRUE`/`FALSE`, a plain number plus one (`0` to `1`, `12L` to `13L`, `2.5` to `3.5`), the condition of an `if` or `while` negated (`x` to `!(x)`), and a statement inside braces deleted unless it is a return. A return is a call to `return(...)` or the last expression of a function body. Arithmetic operators and the vectorised `&` and `|` are left alone. |
+| R | `==`/`!=`, `<`/`<=`, `>`/`>=`, `&&`/`||`, `TRUE`/`FALSE`, a plain number plus one (`0` to `1`, `12L` to `13L`, `2.5` to `3.5`), the condition of an `if` or `while` negated (`x` to `!(x)`), and a statement inside braces deleted unless it is a return. A return is a call to `return(...)`, also when written with backticks or wrapped as in `invisible(return(x))`, or an expression whose value the function gives back: the last expression of the body and, when that is an `if` or a `switch`, the last expression of each branch. Arithmetic operators and the vectorised `&` and `|` are left alone. |
 
 ## Tests and coverage
 
@@ -113,9 +113,11 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | TypeScript | `npm test` | nearest `package.json` |
 | Rust | `cargo test` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
-| R | `testthat::test_local()` for a package. For loose scripts, each `tests/testthat/test*.R` or `tests/test*.R` file in its own `Rscript`, stopping at the first that fails | nearest `DESCRIPTION`, or the project root |
+| R | `testthat::test_local()` for a package. For loose scripts, `testthat::test_dir()` when `tests/testthat` holds the tests, otherwise each `tests/test*.R` file in its own `Rscript`, stopping at the first that fails | nearest `DESCRIPTION`, or the project root |
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
+
+For R, a site is covered when the smallest expression covr measured round it ran, so the branch of a one-line `if` that never ran is not tried and the branch that did run is. When only an LCOV report is on disk, the site's line decides. In an R worker the `tests` folder is made of real folders, not a link, because R finds a package and relative paths from the real location of the running test.
 
 ## Development
 

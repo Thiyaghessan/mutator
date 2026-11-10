@@ -267,6 +267,33 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
     destination.write_bytes(original)
 
 
+# R finds a package, and a path such as `../../R/box.R`, from the real
+# location of the running test folder. Through a link that is the original
+# project, so the tests would load the unmutated source.
+_R_SUFFIXES = (".R", ".r")
+_R_TEST_FOLDER = "tests"
+
+
+def _real_folders(link: Path, real_dir: Path) -> None:
+    """Make `link` and every folder under it a real folder. The files stay links."""
+
+    pending = [(link, real_dir)]
+    while pending:
+        current, real = pending.pop()
+        if not current.is_symlink():
+            continue
+        _expand_directory(current, real)
+        for child in real.iterdir():
+            if child.is_dir() and child.name not in SKIP_LINK:
+                pending.append((current / child.name, child))
+
+
+def _keep_r_tests_in_the_worker(worker: Path, root: Path, relative: str) -> None:
+    if not relative.endswith(_R_SUFFIXES):
+        return
+    _real_folders(worker / _R_TEST_FOLDER, root / _R_TEST_FOLDER)
+
+
 def create_workers(
     base: Path, root: Path, relative: str, original: bytes, count: int
 ) -> list[Path]:
@@ -279,6 +306,7 @@ def create_workers(
         _copy_configs(worker, root, relative)
         _link_children(worker, root, {first})
         _overlay(worker, root, relative, original)
+        _keep_r_tests_in_the_worker(worker, root, relative)
         for importer in importers:
             _copy_importer(worker, root, importer)
         created.append(worker)

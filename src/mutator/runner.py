@@ -236,13 +236,23 @@ for (test_file in commandArgs(trailingOnly = TRUE)) {
 """
 
 
+# Hands a testthat folder to testthat, which loads its helper and setup files.
+_R_RUN_TESTTHAT_FOLDER = (
+    "testthat::test_dir(commandArgs(trailingOnly = TRUE)[[1]], stop_on_failure = TRUE)"
+)
+
+
 def _r_plan(root: Path, source: Path) -> tuple[Command, Path]:
-    """testthat for a package. For loose scripts, the test files crapper measures."""
+    """testthat for a package. For loose scripts, the tests crapper measures."""
 
     directory = _nearest_marker(source, root, ("DESCRIPTION",))
     if (directory / "DESCRIPTION").is_file():
         return ["Rscript", "-e", "testthat::test_local(stop_on_failure = TRUE)"], directory
     crapper = ensure_crapper()
+    testthat_folder = crapper.runners.r_testthat_folder(directory)
+    if testthat_folder is not None:
+        folder = testthat_folder.relative_to(directory).as_posix()
+        return ["Rscript", "-e", _R_RUN_TESTTHAT_FOLDER, folder], directory
     test_files = [
         path.relative_to(directory).as_posix()
         for path in crapper.runners.r_test_files(directory)
